@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fortnite-like 3D (usa Coche.glb)</title>
+  <style>
+    html,body { height:100%; margin:0; overflow:hidden; font-family: Arial, Helvetica, sans-serif }
+    #ui { position: absolute; left: 12px; top: 12px; color:#fff; z-index:10; text-shadow:0 1px 3px rgba(0,0,0,.7) }
+    #info { background: rgba(0,0,0,0.4); padding:10px; border-radius:8px }
+    #start { display:inline-block; margin-top:8px; padding:8px 12px; background:#1e90ff; color:#fff; border-radius:6px; cursor:pointer }
+    #canvas-container { width:100%; height:100vh }
+    .hint { font-size:13px; opacity:.9 }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <div id="ui">
+    <div id="info">
+      <div><strong>Fortnite-like (demo)</strong></div>
+      <div class="hint">Controles: clic para bloquear puntero, WASD para moverte, mouse para mirar</div>
+      <div style="margin-top:8px">Vida: <span id="health">100</span> &nbsp;|&nbsp; Enemigos: <span id="enemyCount">0</span></div>
+      <div id="start">Iniciar demo</div>
+      <div style="margin-top:6px;font-size:12px;opacity:.8">Coloca <code>Coche.glb</code> en la misma carpeta que este HTML y sirve mediante HTTP (live-server, python -m http.server, etc.)</div>
+    </div>
+  </div>
+
+  <script type="module">
+    // IMPORTS desde unpkg (requiere servir por HTTP/HTTPS)
+    import * as THREE from 'https://unpkg.com/three@0.152.2/build/three.module.js';
+    import { GLTFLoader } from 'https://unpkg.com/three@0.152.2/examples/jsm/loaders/GLTFLoader.js';
+    import { DRACOLoader } from 'https://unpkg.com/three@0.152.2/examples/jsm/loaders/DRACOLoader.js';
+    import { PointerLockControls } from 'https://unpkg.com/three@0.152.2/examples/jsm/controls/PointerLockControls.js';
+    
+    const container = document.getElementById('canvas-container');
+    const startBtn = document.getElementById('start');
+    const healthEl = document.getElementById('health');
+    const enemyCountEl = document.getElementById('enemyCount');
+
+    // ESCENARIO básico
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    // niebla para mejor profundidad
+    scene.fog = new THREE.Fog(0x87ceeb, 10, 80);
+
+    const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+    camera.position.set(0, 1.6, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    container.appendChild(renderer.domElement);
+
+    // LUCES
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(5, 10, 7);
+    dir.castShadow = true;
+    dir.shadow.camera.top = 10; dir.shadow.camera.bottom = -10; dir.shadow.camera.left = -10; dir.shadow.camera.right = 10;
+    scene.add(dir);
+
+    // SUELO
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(200,200), groundMat);
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // CONTROLES (PointerLock para movimiento tipo FPS)
+    const controls = new PointerLockControls(camera, renderer.domElement);
+    let move = { forward:false, back:false, left:false, right:false };
+    let velocity = new THREE.Vector3();
+    const speed = 6; // m/s
+
+    // GESTIÓN de teclado
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyW') move.forward = true;
+      if (e.code === 'KeyS') move.back = true;
+      if (e.code === 'KeyA') move.left = true;
+      if (e.code === 'KeyD') move.right = true;
+    });
+    document.addEventListener('keyup', (e) => {
+      if (e.code === 'KeyW') move.forward = false;
+      if (e.code === 'KeyS') move.back = false;
+      if (e.code === 'KeyA') move.left = false;
+      if (e.code === 'KeyD') move.right = false;
+    });
+
+    // Pointer lock: clic para bloquear
+    startBtn.addEventListener('click', () => {
+      controls.lock();
+    });
+    controls.addEventListener('lock', () => {
+      startBtn.style.display = 'none';
+    });
+    controls.addEventListener('unlock', () => {
+      startBtn.style.display = 'inline-block';
+    });
+
+    // CARGADOR glTF
+    const gltfLoader = new GLTFLoader();
+    // opcional: draco si tu glb está comprimido
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath('https://unpkg.com/three@0.152.2/examples/jsm/libs/draco/');
+    gltfLoader.setDRACOLoader(dracoLoader);
+
+    // Variables del juego
+    let playerModel = null;
+    const enemies = []; // {mesh, mixer}
+    const mixers = []; // anim mixers
+    let playerHealth = 100;
+
+    // Load model 'Coche.glb' (el usuario debe subirlo y colocarlo junto al HTML)
+    gltfLoader.load('Coche.glb', (gltf) => {
+      // centramos y escalamos el modelo de forma defensiva
+      const root = gltf.scene;
+      root.traverse((c) => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+
+      // ajusta la escala si el modelo es grande/pequeño
+      const bbox = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3(); bbox.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const target = 1.0; // tamaño deseado en metros
+      const scale = (maxDim > 0) ? (target / maxDim) : 1;
+      root.scale.setScalar(scale);
+      root.position.set(0, 0, 0);
+
+      // MODEL del jugador: clonamos el gltf.scene
+      playerModel = root.clone();
+      playerModel.position.set(0, 0, 0);
+      scene.add(playerModel);
+
+      // Si hay animaciones, prepararlas
+      if (gltf.animations && gltf.animations.length) {
+        const mixer = new THREE.AnimationMixer(playerModel);
+        mixers.push(mixer);
+        gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
+      }
+
+      // Crear algunos enemigos (clones)
+      const enemyCount = 6;
+      for (let i=0;i<enemyCount;i++) {
+        const e = root.clone();
+        // posición aleatoria alrededor
+        const angle = Math.random()*Math.PI*2;
+        const dist = 8 + Math.random()*12;
+        e.position.set(Math.cos(angle)*dist, 0, Math.sin(angle)*dist);
+        scene.add(e);
+        const enemy = { mesh: e, speed: 1.5 + Math.random()*1.5 };
+        enemies.push(enemy);
+
+        // anims para enemigo
+        if (gltf.animations && gltf.animations.length) {
+          const m = new THREE.AnimationMixer(e);
+          mixers.push(m);
+          gltf.animations.forEach((clip) => m.clipAction(clip).play());
+        }
+      }
+
+      enemyCountEl.textContent = enemies.length;
+
+      console.log('Modelo "Coche.glb" cargado y clonado para jugador y enemigos.');
+    }, undefined, (err) => {
+      console.error('Error cargando Coche.glb:', err);
+      alert('No se pudo cargar Coche.glb. ¿Lo colocaste en la misma carpeta y sirves el HTML por HTTP?');
+    });
+
+    // temporizador y anim loop
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = clock.getDelta();
+
+      // actualizar mixers de animación
+      mixers.forEach(m => m.update(dt));
+
+      // movimiento del jugador (relativo a la cámara)
+      const dir = new THREE.Vector3();
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      forward.y = 0; forward.normalize();
+      const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), forward).normalize();
+
+      dir.set(0,0,0);
+      if (move.forward) dir.add(forward);
+      if (move.back) dir.sub(forward);
+      if (move.left) dir.add(right);
+      if (move.right) dir.sub(right);
+      if (dir.length() > 0) dir.normalize();
+
+      velocity.copy(dir).multiplyScalar(speed * dt);
+      controls.getObject().position.add(velocity);
+
+      // mantener la cámara cerca del modelo jugador si existe
+      if (playerModel) {
+        playerModel.position.copy(controls.getObject().position);
+        // opcional: ajustar orientación del modelo hacia la dirección de la cámara
+        const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir); camDir.y = 0; camDir.normalize();
+        if (camDir.length() > 0.001) {
+          playerModel.lookAt(playerModel.position.clone().add(camDir));
+        }
+      }
+
+      // AI simplificada: enemigo va hacia jugador
+      enemies.forEach((e, idx) => {
+        const toPlayer = new THREE.Vector3().subVectors(controls.getObject().position, e.mesh.position);
+        const dist = toPlayer.length();
+        if (dist > 0.1) {
+          toPlayer.normalize();
+          e.mesh.position.addScaledVector(toPlayer, e.speed * dt);
+          e.mesh.lookAt(controls.getObject().position.x, e.mesh.position.y, controls.getObject().position.z);
+        }
+
+        // colisión simple: si enemigo toca jugador, pierde vida
+        const hitDistance = 1.2;
+        if (dist < hitDistance) {
+          // aplicar daño y retroceso
+          playerHealth -= 10 * dt; // daño por segundo mientras está cerca
+          if (playerHealth < 0) playerHealth = 0;
+          healthEl.textContent = Math.round(playerHealth);
+        }
+      });
+
+      // actualizar contador de enemigos activos
+      enemyCountEl.textContent = enemies.length;
+
+      renderer.render(scene, camera);
+    }
+
+    // Ajustar tamaño en resize
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // Inicialización de controls: colocamos al objeto del controls en escena
+    const playerObj = controls.getObject();
+    playerObj.position.set(0, 1.6, 0);
+    scene.add(playerObj);
+
+    // configurar colisión simple con el suelo (mantener altura)
+    function clampPlayerToGround() {
+      playerObj.position.y = 1.6; // altura fija para demo
+      if (playerModel) playerModel.position.y = 0; // aseguramos que el modelo quede en el suelo
+    }
+
+    // Start loop cuando el usuario pulse "Iniciar"
+    startBtn.addEventListener('click', () => {
+      // asegurarse de que la cámara esté puesta en el lugar correcto
+      camera.position.copy(playerObj.position);
+      animate();
+      // intervalo que clampa en caso de fisica simple
+      setInterval(clampPlayerToGround, 100);
+    });
+
+    // Mensaje de ayuda rápida
+    console.log('Página lista. Clic en "Iniciar demo" y luego clic en el canvas para bloquear el puntero.');
+  </script>
+</body>
+</html>
